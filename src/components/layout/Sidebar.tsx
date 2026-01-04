@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Link, useLocation } from "react-router-dom";
+import { useAuth } from "@/contexts/AuthContext";
 import {
   LayoutDashboard,
   Users,
@@ -30,12 +31,18 @@ const menuItems = [
 ];
 
 const bottomMenuItems = [
+  { icon: Shield, label: "Admin", path: "/admin", adminOnly: true },
   { icon: Settings, label: "Settings", path: "/settings" },
 ];
 
 export const Sidebar = () => {
   const [collapsed, setCollapsed] = useState(false);
   const location = useLocation();
+  const { hasRole } = useAuth();
+
+  const filteredBottomMenuItems = bottomMenuItems.filter(
+    (item) => !item.adminOnly || hasRole("admin")
+  );
 
   return (
     <aside
@@ -91,7 +98,7 @@ export const Sidebar = () => {
       {/* Bottom Section */}
       <div className="border-t border-sidebar-border px-3 py-4">
         <ul className="space-y-1">
-          {bottomMenuItems.map((item) => {
+          {filteredBottomMenuItems.map((item) => {
             const isActive = location.pathname === item.path;
             return (
               <li key={item.path}>

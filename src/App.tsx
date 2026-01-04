@@ -7,6 +7,7 @@ import { AuthProvider } from "@/contexts/AuthContext";
 import { ProtectedRoute } from "@/components/auth/ProtectedRoute";
 import Index from "./pages/Index";
 import Employees from "./pages/Employees";
+import Admin from "./pages/Admin";
 import Auth from "./pages/Auth";
 import NotFound from "./pages/NotFound";
 
@@ -34,6 +35,14 @@ const App = () => (
               element={
                 <ProtectedRoute allowedRoles={["admin", "hr_manager", "hr_officer"]}>
                   <Employees />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/admin"
+              element={
+                <ProtectedRoute allowedRoles={["admin"]}>
+                  <Admin />
                 </ProtectedRoute>
               }
             />
