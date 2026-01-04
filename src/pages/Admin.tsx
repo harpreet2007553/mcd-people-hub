@@ -5,9 +5,12 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
-import { Shield, Users } from "lucide-react";
+import { useAuth } from "@/contexts/AuthContext";
+import { Shield, Users, History, ArrowRight } from "lucide-react";
+import { format } from "date-fns";
 import type { Database } from "@/integrations/supabase/types";
 
 type AppRole = Database["public"]["Enums"]["app_role"];
@@ -22,6 +25,17 @@ interface UserWithRole {
   designation: string | null;
   role: AppRole;
   role_id: string;
+}
+
+interface AuditLogEntry {
+  id: string;
+  target_user_id: string;
+  changed_by_user_id: string;
+  old_role: AppRole;
+  new_role: AppRole;
+  changed_at: string;
+  target_user_name?: string;
+  changed_by_name?: string;
 }
 
 const roleColors: Record<AppRole, string> = {
@@ -42,9 +56,12 @@ const roleLabels: Record<AppRole, string> = {
 
 const Admin = () => {
   const [users, setUsers] = useState<UserWithRole[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [auditLoading, setAuditLoading] = useState(true);
   const [updating, setUpdating] = useState<string | null>(null);
   const { toast } = useToast();
+  const { user } = useAuth();
 
   const fetchUsers = async () => {
     try {
@@ -87,25 +104,73 @@ const Admin = () => {
     }
   };
 
+  const fetchAuditLogs = async () => {
+    try {
+      const { data: logs, error: logsError } = await supabase
+        .from("role_audit_log")
+        .select("*")
+        .order("changed_at", { ascending: false })
+        .limit(50);
+
+      if (logsError) throw logsError;
+
+      const { data: profiles } = await supabase.from("profiles").select("user_id, full_name");
+
+      const profileMap = new Map(profiles?.map((p) => [p.user_id, p.full_name]) || []);
+
+      const logsWithNames: AuditLogEntry[] = (logs || []).map((log) => ({
+        ...log,
+        target_user_name: profileMap.get(log.target_user_id) || "Unknown User",
+        changed_by_name: profileMap.get(log.changed_by_user_id) || "Unknown User",
+      }));
+
+      setAuditLogs(logsWithNames);
+    } catch (error: any) {
+      toast({
+        variant: "destructive",
+        title: "Error fetching audit logs",
+        description: error.message,
+      });
+    } finally {
+      setAuditLoading(false);
+    }
+  };
+
   useEffect(() => {
     fetchUsers();
+    fetchAuditLogs();
   }, []);
 
-  const handleRoleChange = async (userId: string, roleId: string, newRole: AppRole) => {
+  const handleRoleChange = async (userId: string, roleId: string, oldRole: AppRole, newRole: AppRole) => {
+    if (oldRole === newRole) return;
+    
     setUpdating(userId);
     try {
-      const { error } = await supabase
+      const { error: updateError } = await supabase
         .from("user_roles")
         .update({ role: newRole })
         .eq("id", roleId);
 
-      if (error) throw error;
+      if (updateError) throw updateError;
+
+      // Log the role change
+      const { error: auditError } = await supabase.from("role_audit_log").insert({
+        target_user_id: userId,
+        changed_by_user_id: user?.id || "",
+        old_role: oldRole,
+        new_role: newRole,
+      });
+
+      if (auditError) {
+        console.error("Failed to log audit entry:", auditError);
+      }
 
       setUsers((prev) =>
-        prev.map((user) =>
-          user.user_id === userId ? { ...user, role: newRole } : user
-        )
+        prev.map((u) => (u.user_id === userId ? { ...u, role: newRole } : u))
       );
+
+      // Refresh audit logs
+      fetchAuditLogs();
 
       toast({
         title: "Role updated",
@@ -182,89 +247,166 @@ const Admin = () => {
           </Card>
         </div>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>User Roles Management</CardTitle>
-            <CardDescription>
-              View and modify user roles. Changes take effect immediately.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            {loading ? (
-              <div className="flex items-center justify-center py-8">
-                <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
-              </div>
-            ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>User</TableHead>
-                    <TableHead>Department</TableHead>
-                    <TableHead>Designation</TableHead>
-                    <TableHead>Current Role</TableHead>
-                    <TableHead>Change Role</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {users.map((user) => (
-                    <TableRow key={user.id}>
-                      <TableCell>
-                        <div className="flex items-center gap-3">
-                          <Avatar className="h-9 w-9">
-                            <AvatarImage src={user.avatar_url || undefined} />
-                            <AvatarFallback className="bg-primary/10 text-primary text-xs">
-                              {getInitials(user.full_name)}
-                            </AvatarFallback>
-                          </Avatar>
-                          <div>
-                            <p className="font-medium">{user.full_name}</p>
-                            <p className="text-sm text-muted-foreground">
-                              {user.email}
-                            </p>
-                          </div>
-                        </div>
-                      </TableCell>
-                      <TableCell>{user.department || "—"}</TableCell>
-                      <TableCell>{user.designation || "—"}</TableCell>
-                      <TableCell>
-                        <Badge className={roleColors[user.role]}>
-                          {roleLabels[user.role]}
-                        </Badge>
-                      </TableCell>
-                      <TableCell>
-                        <Select
-                          value={user.role}
-                          onValueChange={(value: AppRole) =>
-                            handleRoleChange(user.user_id, user.role_id, value)
-                          }
-                          disabled={updating === user.user_id}
-                        >
-                          <SelectTrigger className="w-[160px]">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="admin">Admin</SelectItem>
-                            <SelectItem value="hr_manager">HR Manager</SelectItem>
-                            <SelectItem value="hr_officer">HR Officer</SelectItem>
-                            <SelectItem value="department_head">Department Head</SelectItem>
-                            <SelectItem value="employee">Employee</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                  {users.length === 0 && (
-                    <TableRow>
-                      <TableCell colSpan={5} className="text-center py-8 text-muted-foreground">
-                        No users found
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            )}
-          </CardContent>
-        </Card>
+        <Tabs defaultValue="users" className="space-y-4">
+          <TabsList>
+            <TabsTrigger value="users" className="gap-2">
+              <Users className="h-4 w-4" />
+              User Roles
+            </TabsTrigger>
+            <TabsTrigger value="audit" className="gap-2">
+              <History className="h-4 w-4" />
+              Audit Log
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="users">
+            <Card>
+              <CardHeader>
+                <CardTitle>User Roles Management</CardTitle>
+                <CardDescription>
+                  View and modify user roles. Changes take effect immediately.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {loading ? (
+                  <div className="flex items-center justify-center py-8">
+                    <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
+                  </div>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>User</TableHead>
+                        <TableHead>Department</TableHead>
+                        <TableHead>Designation</TableHead>
+                        <TableHead>Current Role</TableHead>
+                        <TableHead>Change Role</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {users.map((userItem) => (
+                        <TableRow key={userItem.id}>
+                          <TableCell>
+                            <div className="flex items-center gap-3">
+                              <Avatar className="h-9 w-9">
+                                <AvatarImage src={userItem.avatar_url || undefined} />
+                                <AvatarFallback className="bg-primary/10 text-primary text-xs">
+                                  {getInitials(userItem.full_name)}
+                                </AvatarFallback>
+                              </Avatar>
+                              <div>
+                                <p className="font-medium">{userItem.full_name}</p>
+                                <p className="text-sm text-muted-foreground">
+                                  {userItem.email}
+                                </p>
+                              </div>
+                            </div>
+                          </TableCell>
+                          <TableCell>{userItem.department || "—"}</TableCell>
+                          <TableCell>{userItem.designation || "—"}</TableCell>
+                          <TableCell>
+                            <Badge className={roleColors[userItem.role]}>
+                              {roleLabels[userItem.role]}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>
+                            <Select
+                              value={userItem.role}
+                              onValueChange={(value: AppRole) =>
+                                handleRoleChange(userItem.user_id, userItem.role_id, userItem.role, value)
+                              }
+                              disabled={updating === userItem.user_id}
+                            >
+                              <SelectTrigger className="w-[160px]">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="admin">Admin</SelectItem>
+                                <SelectItem value="hr_manager">HR Manager</SelectItem>
+                                <SelectItem value="hr_officer">HR Officer</SelectItem>
+                                <SelectItem value="department_head">Department Head</SelectItem>
+                                <SelectItem value="employee">Employee</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                      {users.length === 0 && (
+                        <TableRow>
+                          <TableCell colSpan={5} className="text-center py-8 text-muted-foreground">
+                            No users found
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="audit">
+            <Card>
+              <CardHeader>
+                <CardTitle>Role Change History</CardTitle>
+                <CardDescription>
+                  Track all role changes with timestamps and who made the change.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {auditLoading ? (
+                  <div className="flex items-center justify-center py-8">
+                    <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
+                  </div>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Date & Time</TableHead>
+                        <TableHead>User Changed</TableHead>
+                        <TableHead>Role Change</TableHead>
+                        <TableHead>Changed By</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {auditLogs.map((log) => (
+                        <TableRow key={log.id}>
+                          <TableCell className="text-muted-foreground">
+                            {format(new Date(log.changed_at), "MMM d, yyyy h:mm a")}
+                          </TableCell>
+                          <TableCell className="font-medium">
+                            {log.target_user_name}
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex items-center gap-2">
+                              <Badge variant="outline" className={roleColors[log.old_role]}>
+                                {roleLabels[log.old_role]}
+                              </Badge>
+                              <ArrowRight className="h-4 w-4 text-muted-foreground" />
+                              <Badge className={roleColors[log.new_role]}>
+                                {roleLabels[log.new_role]}
+                              </Badge>
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-muted-foreground">
+                            {log.changed_by_name}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                      {auditLogs.length === 0 && (
+                        <TableRow>
+                          <TableCell colSpan={4} className="text-center py-8 text-muted-foreground">
+                            No role changes recorded yet
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+        </Tabs>
       </div>
     </DashboardLayout>
   );
